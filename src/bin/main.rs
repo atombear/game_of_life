@@ -1,5 +1,5 @@
 use ndarray_csv::{Array2Reader, Array2Writer};
-use std::{cell::RefCell, collections::HashMap, thread::sleep, time::Duration, thread};
+use std::{cell::RefCell, collections::HashMap, thread::sleep, time::Duration, thread, sync::RwLock};
 
 static NUM_ROW_GROUPS: u64 = 3;
 static NUM_COL_GROUPS: u64 = 3;
@@ -96,7 +96,9 @@ fn count_neighbors(brd: &ndarray::Array2<u8>,
 
 fn print_board(brd: &ndarray::Array2<u8>,
                rows: &usize,
-               cols: &usize) {
+               cols: &usize,
+               frame_num: &usize) {
+    println!("{} {}", "Frame", frame_num);
     for r in 0..*rows {
         for c in 0..*cols {
             print!("{} ", brd[[r, c]]);
@@ -111,8 +113,8 @@ fn capture_moves(brd: &ndarray::Array2<u8>,
                  start_row: &usize,
                  stop_row: &usize,
                  start_col: &usize,
-                 stop_col: &usize,
-                 moves: &mut Vec<(usize, usize, u8)>) {
+                 stop_col: &usize) -> Vec<(usize, usize, u8)> {
+    let mut moves: Vec<(usize, usize, u8)> = vec![];
     for r in *start_row..*stop_row {
         for c in *start_col..*stop_col {
             let count = count_neighbors(brd, rows, cols, &r, &c);
@@ -122,6 +124,7 @@ fn capture_moves(brd: &ndarray::Array2<u8>,
                 moves.push((r, c, 1)); }
         }
     }
+    return moves;
 }
 
 fn get_groups(num: u64, num_groups: u64) -> Vec<usize> {
@@ -163,7 +166,7 @@ fn main() {
     let mut moves: Vec<(usize, usize, u8)> = vec![];
     // A board for visualization and a board for modification.
     let viz_board = boards.get(&0).unwrap().borrow();
-    let mut life_board = boards.get(&1).unwrap().borrow_mut();
+    let mut life_board_rwlock = RwLock::new(boards.get(&1).unwrap().borrow_mut());
 
     let row_groups: Vec<usize> = get_groups(rows as u64, NUM_ROW_GROUPS);
     let col_groups: Vec<usize> = get_groups(cols as u64, NUM_COL_GROUPS);
@@ -183,43 +186,54 @@ fn main() {
         row_first_idx += r_len;
     }
 
-    // let handles: Vec<thread::JoinHandle<_>> = vec![];
+    let mut handles: Vec<thread::JoinHandle<_>> = vec![];
+    let mut moves: Vec<(usize, usize, u8)> = vec![];
     for iter in 0..50 {
 
+        // Clear screen.
         print!("{}[2J", 27 as char);
         sleep(Duration::from_millis(500 as u64));
-        print_board(&life_board, &rows, &cols);
-        for (r0, rl, c0, cl) in &extents {
-            capture_moves(&life_board,
-                          &rows,
-                          &cols,
-                          &r0,
-                          &rl,
-                          &c0,
-                          &cl,
-                          &mut moves);
+        print_board(&life_board_rwlock.read().unwrap(), &rows, &cols, &iter);
+        for &(r0, rl, c0, cl) in &extents {
+            {
+                let life_board = life_board_rwlock.read().unwrap();
+                for mv in capture_moves(&life_board,
+                                        &rows,
+                                        &cols,
+                                        &r0,
+                                        &rl,
+                                        &c0,
+                                        &cl) {
+                    moves.push(mv);
+                }
+            }
 
-            // handles.push(
-            //     thread::spawn(|| {
-            //         capture_moves(&life_board,
-            //                       &rows,
-            //                       &cols,
-            //               &r0,
-            //               &rl,
-            //               &c0,
-            //               &cl,
-            //                       &mut moves); }
-            //     )
-            // );
+            handles.push(
+                thread::spawn(move || {
+                    println!("{} {} {} {}", r0, rl, c0, cl);
+                    // let life_board = life_board_rwlock.read().unwrap();
+                    // capture_moves(&life_board,
+                    //                     &rows,
+                    //                     &cols,
+                    //                     &r0,
+                    //                     &rl,
+                    //                     &c0,
+                    //                     &cl);
+                }
+                )
+            );
         }
-        // while handles.len() > 0 {
-        //     let h = handles.pop().unwrap();
-        //     h.join().unwrap();
-        // }
+        while handles.len() > 0 {
+            let h = handles.pop().unwrap();
+            h.join().unwrap();
+        }
 
         while moves.len() > 0 {
             let (r, c, v) = moves.pop().unwrap();
-            life_board[[r, c]] = v;
+            {
+                let mut life_board = life_board_rwlock.write().unwrap();
+                life_board[[r, c]] = v;
+            }
         }
     }
 
