@@ -1,5 +1,5 @@
 use ndarray_csv::{Array2Reader, Array2Writer};
-use std::{cell::RefCell, collections::HashMap, thread::sleep, time::Duration, thread, sync::RwLock};
+use std::{cell::RefCell, collections::HashMap, thread::sleep, time::Duration, thread, sync::RwLock, sync::Arc};
 
 static NUM_ROW_GROUPS: u64 = 3;
 static NUM_COL_GROUPS: u64 = 3;
@@ -153,20 +153,19 @@ fn main() {
                                               .expect("Cannot read file");
 
     let mut data0: ndarray::Array2<u8> = reader.deserialize_array2_dynamic().unwrap();
-    let mut data1: ndarray::Array2<u8> = data0.to_owned();
+    let mut data1: RwLock<ndarray::Array2<u8>> = RwLock::new(data0.to_owned());
 
     let rows: usize = data0.shape()[0];
     let cols: usize = data0.shape()[1];
 
-    let mut boards: HashMap<u8, RefCell<ndarray::Array2<u8>>> = HashMap::new();
-    boards.insert(0, RefCell::new(data0));
-    boards.insert(1, RefCell::new(data1));
+    // let mut boards: HashMap<u8, Arc<RwLock<ndarray::Array2<u8>>>> = HashMap::new();
+    // boards.insert(0, RwLock::new(data0));
+    // boards.insert(1, Arc::new(RwLock::new(data1)));
 
     // Track the changes that must be made to the next iteration.
-    let mut moves: Vec<(usize, usize, u8)> = vec![];
     // A board for visualization and a board for modification.
-    let viz_board = boards.get(&0).unwrap().borrow();
-    let mut life_board_rwlock = RwLock::new(boards.get(&1).unwrap().borrow_mut());
+    // let viz_board = boards.get(&0).unwrap().borrow();
+    // let mut life_board_rwlock = RwLock::new(boards.get(&1).unwrap().borrow_mut());
 
     let row_groups: Vec<usize> = get_groups(rows as u64, NUM_ROW_GROUPS);
     let col_groups: Vec<usize> = get_groups(cols as u64, NUM_COL_GROUPS);
@@ -186,18 +185,18 @@ fn main() {
         row_first_idx += r_len;
     }
 
-    let mut handles: Vec<thread::JoinHandle<_>> = vec![];
+    // let life_board_rwlock = boards.get_mut(&1).unwrap();
+    // let mut handles: Vec<thread::JoinHandle<_>> = vec![];
     let mut moves: Vec<(usize, usize, u8)> = vec![];
     for iter in 0..50 {
 
         // Clear screen.
         print!("{}[2J", 27 as char);
         sleep(Duration::from_millis(500 as u64));
-        print_board(&life_board_rwlock.read().unwrap(), &rows, &cols, &iter);
+        { print_board(&(data1.read().unwrap()), &rows, &cols, &iter); }
         for &(r0, rl, c0, cl) in &extents {
             {
-                let life_board = life_board_rwlock.read().unwrap();
-                for mv in capture_moves(&life_board,
+                for mv in capture_moves(&(data1.read().unwrap()),
                                         &rows,
                                         &cols,
                                         &r0,
@@ -208,31 +207,30 @@ fn main() {
                 }
             }
 
-            handles.push(
-                thread::spawn(move || {
-                    println!("{} {} {} {}", r0, rl, c0, cl);
-                    // let life_board = life_board_rwlock.read().unwrap();
-                    // capture_moves(&life_board,
-                    //                     &rows,
-                    //                     &cols,
-                    //                     &r0,
-                    //                     &rl,
-                    //                     &c0,
-                    //                     &cl);
-                }
-                )
-            );
+            // handles.push(
+            //     thread::spawn(move || {
+            //         // println!("{} {} {} {}", r0, rl, c0, cl);
+            //         capture_moves(&data1,
+            //                             &rows,
+            //                             &cols,
+            //                             &r0,
+            //                             &rl,
+            //                             &c0,
+            //                             &cl);
+            //     }
+            //     )
+            // );
         }
-        while handles.len() > 0 {
-            let h = handles.pop().unwrap();
-            h.join().unwrap();
-        }
+        // while handles.len() > 0 {
+        //     let h = handles.pop().unwrap();
+        //     h.join().unwrap();
+        // }
 
         while moves.len() > 0 {
             let (r, c, v) = moves.pop().unwrap();
             {
-                let mut life_board = life_board_rwlock.write().unwrap();
-                life_board[[r, c]] = v;
+                // let mut life_board = life_board_rwlock.clone().write().unwrap();
+                data1.write().unwrap()[[r, c]] = v;
             }
         }
     }
