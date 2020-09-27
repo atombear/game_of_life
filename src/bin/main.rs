@@ -1,6 +1,7 @@
-use ndarray_csv::{Array2Reader, Array2Writer};
+use itertools::iproduct;
 use ndarray::array;
-use std::{cell::RefCell, collections::HashMap, thread::sleep, time::Duration, thread, sync::RwLock, sync::Arc, sync::mpsc};
+use ndarray_csv::Array2Reader;
+use std::{thread::sleep, time::Duration, thread, sync::RwLock, sync::Arc, sync::mpsc};
 
 /// Split up the board into non-overlapping sub-boards.
 static NUM_ROW_GROUPS: u64 = 3;
@@ -21,8 +22,6 @@ Any dead cell with exactly three live neighbours becomes a live cell, as if by r
 /// * `cols` - the number of columns.
 ///
 /// ```
-/// use ndarray::array;
-///
 /// let mut arr = array![[0, 1], [1, 0]];
 /// let r = arr.shape()[0];
 /// let c = arr.shape()[1];
@@ -50,8 +49,6 @@ fn flip_board(brd: &mut ndarray::Array2<u8>, rows: &usize, cols: &usize) {
 /// The sum.
 ///
 /// ```
-/// use ndarray::array;
-///
 /// let mut arr = array![[1, 2], [3, 4]];
 /// assert_eq!(gather_board_values(&arr, &[(0, 0), (1, 1)]), 5);
 /// ```
@@ -74,8 +71,6 @@ fn gather_board_values(brd: &ndarray::Array2<u8>, pos_arr: &[(usize, usize)]) ->
 /// The sum of all neighbors of a particular cell.
 ///
 /// ```
-/// use ndarray::array;
-///
 /// let mut arr = array![[0, 1, 2],
 ///                      [3, 4, 5],
 ///                      [6, 7, 8]];
@@ -160,6 +155,12 @@ fn count_neighbors(brd: &ndarray::Array2<u8>,
         (*r, c - 1)]) }
 }
 
+/// Print a board.
+///
+/// # Arguments
+/// `brd` - the board.
+/// `rows` - the number of rows.
+/// `cols` - the number of columns.
 fn print_board(brd: &ndarray::Array2<u8>,
                rows: &usize,
                cols: &usize,
@@ -173,6 +174,29 @@ fn print_board(brd: &ndarray::Array2<u8>,
     }
 }
 
+/// Iterate through a rectangular sub-board and return an array of tuples each of which designates a
+/// change to the original board.
+///
+/// # Arguments
+/// `brd` - the board.
+/// `rows` - the number of rows.
+/// `cols` - the number of columns.
+/// `start_row` - the row the block starts on.
+/// `stop_row` - the row the block stops on.
+/// `start_col` - the column the block starts on.
+/// `stop_col` - the column the block stops on.
+///
+/// # Returns
+/// An array of moves, specifying the value in a board position.
+///
+/// ```
+/// let mut arr = array![[0, 1, 0],
+///                      [1, 1, 1],
+///                      [1, 0, 0]];
+/// let r = arr.shape()[0];
+/// let c = arr.shape()[1];
+/// assert_eq!(capture_moves(&arr, &r, &c, &0, &2, &0, &1), vec![(0, 0, 1), (1, 0, 1)]);
+/// ```
 fn capture_moves(brd: &ndarray::Array2<u8>,
                  rows: &usize,
                  cols: &usize,
@@ -181,26 +205,42 @@ fn capture_moves(brd: &ndarray::Array2<u8>,
                  start_col: &usize,
                  stop_col: &usize) -> Vec<(usize, usize, u8)> {
     let mut moves: Vec<(usize, usize, u8)> = vec![];
-    for r in *start_row..*stop_row {
-        for c in *start_col..*stop_col {
-            let count = count_neighbors(brd, rows, cols, &r, &c);
-            if (brd[[r, c]] == 1) & ((count < 2) | (count > 3)) {
-                moves.push((r, c, 0)); }
-            else if count == 3 {
-                moves.push((r, c, 1)); }
-        }
+    let mut count: u8;
+    for (r, c) in iproduct!(*start_row..*stop_row, *start_col..*stop_col) {
+        count = count_neighbors(brd, rows, cols, &r, &c);
+        // These are the rules of the game of life - determining whether a cell lives or dies by
+        // considering its neighbors.
+        if (brd[[r, c]] == 1) & ((count < 2) | (count > 3)) {
+            moves.push((r, c, 0)); }
+        else if count == 3 {
+            moves.push((r, c, 1)); }
     }
     return moves;
 }
 
+/// Arithmetically separate a number into num_groups groups as evenly as possible.
+///
+/// # Arguments
+/// `num` - the number to separate.
+/// `num_groups` - the number of groups.
+///
+/// # Returns
+/// A vector with the group sizes.
+///
+/// ```
+/// assert_eq!(get_groups(11, 2), vec![6, 5]);
+/// assert_eq!(get_groups(42, 1), vec![42]);
+/// assert_eq!(get_groups(20, 6), vec![4, 4, 3, 3, 3, 3]);
+/// ```
 fn get_groups(num: u64, num_groups: u64) -> Vec<usize> {
+    let mut len: usize;
     let mut ret: Vec<usize> = vec![];
-    let mut rem = num - num_groups * (num / num_groups);
+    let mut rem: u64 = num - num_groups * (num / num_groups);
 
     for _ in 0..num_groups {
         ret.push((num / num_groups) as usize);
         if rem > 0 {
-            let len = ret.len();
+            len = ret.len();
             ret[len - 1] += 1;
             rem -= 1;
         }
@@ -219,19 +259,11 @@ fn main() {
                                               .expect("Cannot read file");
 
     let data0: ndarray::Array2<u8> = reader.deserialize_array2_dynamic().unwrap();
-    let data1: Arc<RwLock<ndarray::Array2<u8>>> = Arc::new(RwLock::new(data0.to_owned()));
+    // Prepare the data for parallel read operations.
+    let data_board: Arc<RwLock<ndarray::Array2<u8>>> = Arc::new(RwLock::new(data0.to_owned()));
 
     let rows: usize = data0.shape()[0];
     let cols: usize = data0.shape()[1];
-
-    // let mut boards: HashMap<u8, Arc<RwLock<ndarray::Array2<u8>>>> = HashMap::new();
-    // boards.insert(0, RwLock::new(data0));
-    // boards.insert(1, Arc::new(RwLock::new(data1)));
-
-    // Track the changes that must be made to the next iteration.
-    // A board for visualization and a board for modification.
-    // let viz_board = boards.get(&0).unwrap().borrow();
-    // let mut life_board_rwlock = RwLock::new(boards.get(&1).unwrap().borrow_mut());
 
     let row_groups: Vec<usize> = get_groups(rows as u64, NUM_ROW_GROUPS);
     let col_groups: Vec<usize> = get_groups(cols as u64, NUM_COL_GROUPS);
@@ -239,8 +271,9 @@ fn main() {
     let mut extents: Vec<(usize, usize, usize, usize)> = vec![];
 
     let mut row_first_idx: usize = 0;
+    let mut col_first_idx: usize;
     for r_len in &row_groups {
-        let mut col_first_idx: usize = 0;
+        col_first_idx = 0;
         for c_len in &col_groups {
             extents.push((row_first_idx,
                           row_first_idx + r_len,
@@ -251,28 +284,20 @@ fn main() {
         row_first_idx += r_len;
     }
 
-    // let life_board_rwlock = boards.get_mut(&1).unwrap();
     let mut handles: Vec<thread::JoinHandle<_>> = vec![];
-
-    // let mut tx_vec: Vec<Arc<mpsc::Sender<(usize, usize, u8)>>> = vec![];
-    // for _ in 1..extents.len() {
-    //     let new_tx = (&tx).clone();
-    //     tx_vec.push(Arc::new(new_tx));
-    // }
-    // tx_vec.push(Arc::new(tx));
 
     for iter in 0..50 {
 
         let (tx, rx): (mpsc::Sender<(usize, usize, u8)>,
-               mpsc::Receiver<(usize, usize, u8)>) = mpsc::channel();
+                       mpsc::Receiver<(usize, usize, u8)>) = mpsc::channel();
 
         // Clear screen.
         print!("{}[2J", 27 as char);
         sleep(Duration::from_millis(500 as u64));
-        { print_board(&(data1.read().unwrap()), &rows, &cols, &iter); }
+        { print_board(&(data_board.read().unwrap()), &rows, &cols, &iter); }
 
         for &(r0, rl, c0, cl) in &extents {
-            let par_data = data1.clone();
+            let par_data = data_board.clone();
             let par_tx = (&tx).clone();
             handles.push(
                 thread::spawn(move || {
@@ -288,6 +313,7 @@ fn main() {
                 })
             );
         }
+
         while handles.len() > 0 {
             let h = handles.pop().unwrap();
             h.join().unwrap();
@@ -297,34 +323,9 @@ fn main() {
 
         for mv in &rx {
             let (r, c, v) = mv;
-            { data1.write().unwrap()[[r, c]] = v; }
+            { data_board.write().unwrap()[[r, c]] = v; }
         }
     }
-
-    // flip_board(&mut boards.get_mut(&1).unwrap().borrow_mut(), &rows, &cols);
-    //
-    // println!("{} {}", rows, cols);
-    // println!("{:?}", boards.get(&0).unwrap());
-    // println!("{:?}", boards.get(&1).unwrap());
-    //
-    // for i in 0..3 {
-    //     for j in 0..3 {
-    //         println!("{}", count_neighbors(&boards.get(&0).unwrap().borrow(), &rows, &cols, &i, &j));
-    //     }
-    // }
 }
 
 
-// if old_board[[r, c]] == 1 {
-//     if (count < 2) | (count > 3) {
-//         new_board[[r, c]] = 0;
-//         println!("{} {} {} {}", "dead", r, c, count);
-//     }
-// }
-// else if count == 3 {
-//     new_board[[r, c]] = 1;
-//     println!("{} {} {} {}", "alive", r, c, count);
-// }
-// else {
-//     new_board[[r, c]] = old_board[[r, c]];
-// }
