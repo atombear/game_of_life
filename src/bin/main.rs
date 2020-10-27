@@ -1,6 +1,5 @@
 use ndarray_csv::Array2Reader;
-use std::{thread::sleep, time::Duration, thread, sync::RwLock, sync::Arc, sync::mpsc};
-use std::thread::JoinHandle;
+use std::{thread::{sleep, JoinHandle}, time::Duration, thread, sync::RwLock, sync::Arc, sync::mpsc};
 
 use game_of_life::utils;
 
@@ -34,42 +33,53 @@ fn main() {
     let mut h: JoinHandle<()>;
 
     for iter in 0..50 {
-
+        // Create a send / receive pair. A sender will calculate the moves for a particular subgrid
+        // and send them to the receiver.
         let (tx, rx): (mpsc::Sender<(usize, usize, u8)>,
                        mpsc::Receiver<(usize, usize, u8)>) = mpsc::channel();
 
-        // Clear screen.
+        // Clear screen, sleep, and print the board in a context block for the RwLock.
         print!("{}[2J", 27 as char);
         sleep(Duration::from_millis(100 as u64));
         { utils::print_board(&(data_board.read().unwrap()), &rows, &cols, &iter); }
 
+        // Loop over subgrids.
         for &(r0, rl, c0, cl) in &extents {
+            // Use Arc to create a new reference to the board.
             let par_data = data_board.clone();
+            // Create a new reference to the sender.
             let par_tx = (&tx).clone();
             handles.push(
-                thread::spawn(move || {
-                    for mv in utils::capture_moves(&(par_data.read().unwrap()),
-                                                   &rows,
-                                                   &cols,
-                                                   &r0,
-                                                   &rl,
-                                                   &c0,
-                                                   &cl) {
-                        par_tx.send(mv).unwrap();
+                // Create a thread that takes a subgrid (board and boundaries), finds the moves
+                // and sends them to the receiver.
+                thread::spawn(move ||
+                    {
+                        for mv in utils::capture_moves(&(par_data.read().unwrap()),
+                                                       &rows,
+                                                       &cols,
+                                                       &r0,
+                                                       &rl,
+                                                       &c0,
+                                                       &cl) { par_tx.send(mv).unwrap(); }
                     }
-                })
+                )
             );
         }
 
+        // Join all the threads.
         while handles.len() > 0 {
             h = handles.pop().unwrap();
             h.join().unwrap();
         }
 
+        // Drop the sender; otherwise looping over received data will hang.
         drop(tx);
 
+        // Loop over data in the receiver.
         for mv in &rx {
+            // Write the change to the board.
             let (r, c, v) = mv;
+            // Modify the data in a context block for the RwLock.
             { data_board.write().unwrap()[[r, c]] = v; }
         }
     }
